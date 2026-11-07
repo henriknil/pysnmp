@@ -792,31 +792,16 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
             # Sniff for engineIdCache
             k = (transportDomain, transportAddress)
             if k not in self.__engineIdCache:
-                contextEngineId = scopedPDU[0]
-                contextName = scopedPDU[1]
-                pdus = scopedPDU[2]
-                pdu = pdus.getComponent()
+                pdu = scopedPDU[2].getComponent()
                 # Here we assume that authentic/default EngineIDs
                 # come only in the course of engine-to-engine communication.
                 if pdu.tagSet in rfc3411.INTERNAL_CLASS_PDUS:
-                    self.__engineIdCache[k] = {
-                        "securityEngineId": securityEngineId,
-                        "contextEngineId": contextEngineId,
-                        "contextName": contextName,
-                    }
-
-                    expireAt = int(
-                        self.__expirationTimer
-                        + 300 / snmpEngine.transport_dispatcher.get_timer_resolution()
-                    )
-                    if expireAt not in self.__engineIdCacheExpQueue:
-                        self.__engineIdCacheExpQueue[expireAt] = []
-                    self.__engineIdCacheExpQueue[expireAt].append(k)
-
-                    debug.logger & debug.FLAG_MP and debug.logger(
-                        "prepareDataElements: cache securityEngineId {!r} for {!r} {!r}".format(
-                            securityEngineId, transportDomain, transportAddress
-                        )
+                    self.__cache_peer_engine_info(
+                        snmpEngine,
+                        k,
+                        securityEngineId,
+                        scopedPDU[0],
+                        scopedPDU[1],
                     )
 
         (snmpEngineID,) = snmpEngine.get_mib_builder().import_symbols(
@@ -879,6 +864,22 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
                 statusInformation = error.StatusInformation(
                     errorIndication=errind.ReportPduReceived(""),
                     sendPduHandle=sendPduHandle,
+                )
+
+            # A Report matching one of our requests (7.2.10a) but coming from
+            # a different authoritative snmpEngineID than the cached one means
+            # the peer engine was re-initialized with a new identity, e.g.
+            # usmStatsUnknownEngineIDs after an agent restart. Replace the
+            # stale entry so the retry is addressed to the new engine
+            # (engine ID discovery, RFC 3414 section 4).
+            k = (transportDomain, transportAddress)
+            if (
+                k in self.__engineIdCache
+                and securityEngineId
+                and self.__engineIdCache[k]["securityEngineId"] != securityEngineId
+            ):
+                self.__cache_peer_engine_info(
+                    snmpEngine, k, securityEngineId, contextEngineId, contextName
                 )
 
             # 7.2.11b (incomplete implementation)
@@ -1081,10 +1082,34 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
         smHandler.release_state_information(securityStateReference)
         raise error.StatusInformation(errorIndication=errind.unsupportedPDUtype)
 
+    def __cache_peer_engine_info(
+        self, snmpEngine: SnmpEngine, k, securityEngineId, contextEngineId, contextName
+    ):
+        self.__engineIdCache[k] = {
+            "securityEngineId": securityEngineId,
+            "contextEngineId": contextEngineId,
+            "contextName": contextName,
+        }
+
+        expireAt = int(
+            self.__expirationTimer
+            + 300 / snmpEngine.transport_dispatcher.get_timer_resolution()
+        )
+        if expireAt not in self.__engineIdCacheExpQueue:
+            self.__engineIdCacheExpQueue[expireAt] = []
+        self.__engineIdCacheExpQueue[expireAt].append(k)
+
+        debug.logger & debug.FLAG_MP and debug.logger(
+            "prepareDataElements: cache securityEngineId {!r} for {!r} {!r}".format(
+                securityEngineId, *k
+            )
+        )
+
     def __expire_engines_info(self):
         if self.__expirationTimer in self.__engineIdCacheExpQueue:
             for engineKey in self.__engineIdCacheExpQueue[self.__expirationTimer]:
-                del self.__engineIdCache[engineKey]
+                # an entry replaced by a newer Report is queued more than once
+                self.__engineIdCache.pop(engineKey, None)
                 debug.logger & debug.FLAG_MP and debug.logger(
                     f"__expireEnginesInfo: expiring {engineKey!r}"
                 )

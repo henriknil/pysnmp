@@ -3,7 +3,8 @@
 A long-lived manager SnmpEngine keeps addressing the agent by the engine ID
 it discovered first. After the agent is re-initialized with a new
 snmpEngineID, the agent must answer such requests with an unauthenticated
-usmStatsUnknownEngineIDs Report (RFC 3414 3.2.3b), like net-snmp does.
+usmStatsUnknownEngineIDs Report (RFC 3414 3.2.3b), like net-snmp does, and
+the manager must rediscover the engine ID from it (RFC 3414 4).
 """
 
 import asyncio
@@ -108,3 +109,29 @@ async def test_agent_reports_unknown_engine_id_after_restart():
     assert all(
         (flags, oid) == (0x00, USM_STATS_UNKNOWN_ENGINE_IDS) for flags, oid in reports
     )
+
+
+@pytest.mark.asyncio
+async def test_v3_get_after_agent_restart_with_same_engine_id():
+    # RFC 3414 compliant reboot: same engine ID, snmpEngineBoots + 1; the
+    # authenticated usmStatsNotInTimeWindows Report resynchronizes the timeline
+    errorIndication, errorStatus, _, varBinds = await restart_and_get(
+        OLD_ENGINE_ID, new_boots=2, port=AGENT_PORT
+    )
+
+    assert errorIndication is None
+    assert errorStatus == 0
+    assert varBinds[0][0].prettyPrint() == "SNMPv2-MIB::sysDescr.0"
+
+
+@pytest.mark.asyncio
+async def test_v3_get_after_agent_restart_with_new_engine_id():
+    # the manager rediscovers the engine ID from the agent's
+    # usmStatsUnknownEngineIDs Report instead of timing out forever
+    errorIndication, errorStatus, _, varBinds = await restart_and_get(
+        NEW_ENGINE_ID, new_boots=1, port=AGENT_PORT
+    )
+
+    assert errorIndication is None
+    assert errorStatus == 0
+    assert varBinds[0][0].prettyPrint() == "SNMPv2-MIB::sysDescr.0"

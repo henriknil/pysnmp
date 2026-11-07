@@ -1022,6 +1022,8 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
             )
             authoritative = bool(msgFlags & 0x04)
 
+        unauthenticatedReport = False
+
         # 3.2.3
         if (
             msgAuthoritativeEngineId != snmpEngineID
@@ -1035,6 +1037,18 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
                 # 3.2.3a - cloned user when request was sent
                 debug.logger & debug.FLAG_SM and debug.logger(
                     f"processIncomingMsg: non-synchronized securityEngineID {msgAuthoritativeEngineId!r}"
+                )
+                # An unauthenticated Report from an engine we are not
+                # synchronized with, typically usmStatsUnknownEngineIDs from
+                # an agent re-initialized with a new snmpEngineID. It carries
+                # no keyed material and needs no user entry for that engine
+                # ID: process it like the Report of the initial engine ID
+                # discovery (RFC 3414 4); the MPM matches it to the
+                # outstanding request by msgID (RFC 3412 7.2.10).
+                unauthenticatedReport = (
+                    securityLevel == 1
+                    and scopedPduData.getName() == "plaintext"
+                    and pdus.getComponent().tagSet in rfc3411.INTERNAL_CLASS_PDUS
                 )
             else:
                 # 3.2.3b - discovery, or a request for an engine ID that is
@@ -1111,7 +1125,7 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
             )
         )
 
-        if msgUserName:
+        if msgUserName and not unauthenticatedReport:
             # 3.2.4
             try:
                 (
@@ -1182,7 +1196,8 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
                 snmpInGenErrs.syntax += 1
                 raise error.StatusInformation(errorIndication=errind.invalidMsg)
         else:
-            # empty username used for engineID discovery
+            # empty username used for engineID discovery, or an
+            # unauthenticated Report from a non-synchronized engine
             usmUserName = usmUserSecurityName = b""
             usmUserAuthProtocol = noauth.NoAuth.SERVICE_ID
             usmUserPrivProtocol = nopriv.NoPriv.SERVICE_ID
