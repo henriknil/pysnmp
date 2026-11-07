@@ -1008,18 +1008,37 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
             "__SNMP-FRAMEWORK-MIB", "snmpEngineID"
         )[0].syntax  # type: ignore
 
+        # The receiver of a confirmed-class PDU is the authoritative engine
+        # (RFC 3414 1.5.1), so msgAuthoritativeEngineID must be ours. The PDU
+        # class is visible unless the scopedPDU is encrypted; then the
+        # reportableFlag, set only for confirmed-class PDUs, tells instead
+        # (RFC 3412 6.4).
+        if scopedPduData.getName() == "plaintext":
+            pdus = scopedPduData.getComponent().getComponentByPosition(2)
+            authoritative = pdus.getComponent().tagSet in rfc3411.CONFIRMED_CLASS_PDUS
+        else:
+            (msgFlags,) = (
+                msg.getComponentByPosition(1).getComponentByPosition(2).asNumbers()
+            )
+            authoritative = bool(msgFlags & 0x04)
+
         # 3.2.3
         if (
             msgAuthoritativeEngineId != snmpEngineID
             and msgAuthoritativeEngineId not in self.__timeline
         ):
-            if msgAuthoritativeEngineId and 4 < len(msgAuthoritativeEngineId) < 33:
+            if (
+                msgAuthoritativeEngineId
+                and 4 < len(msgAuthoritativeEngineId) < 33
+                and not authoritative
+            ):
                 # 3.2.3a - cloned user when request was sent
                 debug.logger & debug.FLAG_SM and debug.logger(
                     f"processIncomingMsg: non-synchronized securityEngineID {msgAuthoritativeEngineId!r}"
                 )
             else:
-                # 3.2.3b
+                # 3.2.3b - discovery, or a request for an engine ID that is
+                # not ours (e.g. a manager that still knows our previous one)
                 debug.logger & debug.FLAG_SM and debug.logger(
                     "processIncomingMsg: peer requested snmpEngineID discovery"
                 )
@@ -1040,12 +1059,23 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
 
                     # Report original contextName
                     if scopedPduData.getName() != "plaintext":
+                        # An encrypted request can't be decrypted with keys
+                        # localized to another engine ID: report with an
+                        # unknown PDU (request-id 0, RFC 3412 7.1.3c), the
+                        # manager matches the Report by msgID.
                         debug.logger & debug.FLAG_SM and debug.logger(
                             "processIncomingMsg: scopedPduData not plaintext %s"
                             % scopedPduData.prettyPrint()
                         )
                         raise error.StatusInformation(
-                            errorIndication=errind.unknownEngineID
+                            errorIndication=errind.unknownEngineID,
+                            oid=usmStatsUnknownEngineIDs.name,
+                            val=usmStatsUnknownEngineIDs.syntax,
+                            securityStateReference=securityStateReference,
+                            securityLevel=1,
+                            contextEngineId=contextEngineId,
+                            contextName=contextName,
+                            maxSizeResponseScopedPDU=maxSizeResponseScopedPDU,
                         )
 
                     # 7.2.6.a.1
@@ -1058,7 +1088,7 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
                         oid=usmStatsUnknownEngineIDs.name,
                         val=usmStatsUnknownEngineIDs.syntax,
                         securityStateReference=securityStateReference,
-                        securityLevel=securityLevel,
+                        securityLevel=1,
                         contextEngineId=contextEngineId,
                         contextName=contextName,
                         scopedPDU=scopedPdu,
